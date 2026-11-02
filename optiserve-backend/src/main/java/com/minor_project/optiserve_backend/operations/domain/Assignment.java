@@ -1,0 +1,186 @@
+package com.minor_project.optiserve_backend.operations.domain;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.FetchType;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
+import jakarta.persistence.Table;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Objects;
+import java.util.UUID;
+
+@Entity
+@Table(name = "assignments")
+public class Assignment {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private UUID id;
+
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "service_request_id", nullable = false)
+    private ServiceRequest serviceRequest;
+
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "service_stage_id", nullable = false)
+    private ServiceStage serviceStage;
+
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "resource_id", nullable = false)
+    private Resource resource;
+
+    @Column(name = "assigned_at", nullable = false, updatable = false)
+    private Instant assignedAt;
+
+    @Column(name = "started_at")
+    private Instant startedAt;
+
+    @Column(name = "completed_at")
+    private Instant completedAt;
+
+    @Column(name = "predicted_service_duration", precision = 21, scale = 0)
+    private Duration predictedServiceDuration;
+
+    @Column(name = "actual_service_duration", precision = 21, scale = 0)
+    private Duration actualServiceDuration;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "status", nullable = false, length = 32)
+    private AssignmentStatus status;
+
+    protected Assignment() {
+    }
+
+    private Assignment(
+            ServiceStage serviceStage,
+            Resource resource,
+            Instant assignedAt,
+            Duration predictedServiceDuration) {
+        this.serviceStage = Objects.requireNonNull(serviceStage, "serviceStage must not be null");
+        this.serviceRequest = serviceStage.getWorkflow().getServiceRequest();
+        this.resource = Objects.requireNonNull(resource, "resource must not be null");
+        this.assignedAt = Objects.requireNonNull(assignedAt, "assignedAt must not be null");
+        if (predictedServiceDuration != null && (predictedServiceDuration.isNegative() || predictedServiceDuration.isZero())) {
+            throw new IllegalArgumentException("predictedServiceDuration must be positive when provided");
+        }
+        if (serviceStage.getStatus() != ServiceStageStatus.QUEUED) {
+            throw new IllegalStateException("Only a queued service stage can be assigned");
+        }
+        if (resource.getStatus() != ResourceStatus.AVAILABLE) {
+            throw new IllegalStateException("Only an available resource can receive an assignment");
+        }
+        if (!resource.supports(serviceStage.getServiceType())) {
+            throw new IllegalArgumentException("Resource is not compatible with the stage service type");
+        }
+        this.predictedServiceDuration = predictedServiceDuration;
+        this.status = AssignmentStatus.ASSIGNED;
+        serviceStage.assign();
+        resource.markBusy();
+    }
+
+    public static Assignment assign(
+            ServiceStage serviceStage,
+            Resource resource,
+            Instant assignedAt,
+            Duration predictedServiceDuration) {
+        return new Assignment(serviceStage, resource, assignedAt, predictedServiceDuration);
+    }
+
+    public void start(Instant startedAt) {
+        Objects.requireNonNull(startedAt, "startedAt must not be null");
+        if (status != AssignmentStatus.ASSIGNED) {
+            throw new IllegalStateException("Only an assigned service can be started");
+        }
+        if (startedAt.isBefore(assignedAt)) {
+            throw new IllegalArgumentException("startedAt cannot be before assignedAt");
+        }
+        this.startedAt = startedAt;
+        this.status = AssignmentStatus.IN_PROGRESS;
+        serviceStage.start();
+    }
+
+    public void complete(Instant completedAt) {
+        complete(completedAt, null);
+    }
+
+    public void complete(Instant completedAt, Duration actualDuration) {
+        Objects.requireNonNull(completedAt, "completedAt must not be null");
+        if (status != AssignmentStatus.IN_PROGRESS) {
+            throw new IllegalStateException("Only an in-progress assignment can be completed");
+        }
+        if (completedAt.isBefore(startedAt)) {
+            throw new IllegalArgumentException("completedAt cannot be before startedAt");
+        }
+        this.completedAt = completedAt;
+        if (actualDuration != null && (actualDuration.isNegative() || actualDuration.isZero())) {
+            throw new IllegalArgumentException("actualDuration must be positive when provided");
+        }
+        this.actualServiceDuration = actualDuration == null ? Duration.between(startedAt, completedAt) : actualDuration;
+        this.status = AssignmentStatus.COMPLETED;
+        serviceStage.getWorkflow().completeStage(serviceStage, completedAt);
+        if (serviceStage.getWorkflow().getStatus() == ServiceWorkflowStatus.COMPLETED) {
+            serviceRequest.completeFromWorkflow(this.actualServiceDuration);
+        }
+        if (resource.getStatus() == ResourceStatus.BUSY) {
+            resource.markAvailable();
+        }
+    }
+
+    public void cancelBeforeStart() {
+        if (status != AssignmentStatus.ASSIGNED) {
+            throw new IllegalStateException("An in-progress assignment must not be cancelled");
+        }
+        status = AssignmentStatus.CANCELLED;
+        serviceStage.cancel();
+        if (resource.getStatus() == ResourceStatus.BUSY) {
+            resource.markAvailable();
+        }
+    }
+
+    public UUID getId() {
+        return id;
+    }
+
+    public ServiceRequest getServiceRequest() {
+        return serviceRequest;
+    }
+
+    public ServiceStage getServiceStage() {
+        return serviceStage;
+    }
+
+    public Resource getResource() {
+        return resource;
+    }
+
+    public Instant getAssignedAt() {
+        return assignedAt;
+    }
+
+    public Instant getStartedAt() {
+        return startedAt;
+    }
+
+    public Instant getCompletedAt() {
+        return completedAt;
+    }
+
+    public Duration getPredictedServiceDuration() {
+        return predictedServiceDuration;
+    }
+
+    public Duration getActualServiceDuration() {
+        return actualServiceDuration;
+    }
+
+    public AssignmentStatus getStatus() {
+        return status;
+    }
+}
